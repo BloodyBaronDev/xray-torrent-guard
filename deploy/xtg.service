@@ -1,0 +1,24 @@
+[Unit]
+Description=Xray Torrent Guard
+After=network-online.target xray.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/default/xtg
+ExecStart=/usr/local/bin/xtg run --iface ${XTG_IFACE} --xray-log ${XTG_LOG} --xray-log-max ${XTG_LOG_MAX} --only-attributed --api ${XTG_API} --quiet $XTG_ARGS
+Restart=always
+RestartSec=3
+# root без лишних прав: захват пакетов и усечение лога, который пишет Xray
+# (часто от nobody); запись разрешена только в /run/xray
+CapabilityBoundingSet=CAP_NET_RAW CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/xray
+MemoryMax=256M
+CPUQuota=50%
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

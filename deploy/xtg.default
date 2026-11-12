@@ -1,0 +1,8 @@
+# /etc/default/xtg
+XTG_IFACE=eth0
+# Лог Xray в tmpfs: /run очищается при перезагрузке и не пишет на диск.
+XTG_LOG=/run/xray/access.log
+XTG_LOG_MAX=64M
+XTG_API=127.0.0.1:9090
+# Например: --exec '/usr/local/bin/my-ban-hook'  или  --webhook http://127.0.0.1:8000/xtg
+XTG_ARGS=

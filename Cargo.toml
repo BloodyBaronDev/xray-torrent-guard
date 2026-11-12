@@ -1,0 +1,20 @@
+[package]
+name = "xray-torrent-guard"
+version = "0.1.0-rc.1"
+edition = "2021"
+license = "MIT"
+description = "Lightweight BitTorrent traffic detector for VPN/proxy nodes"
+
+[[bin]]
+name = "xtg"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
