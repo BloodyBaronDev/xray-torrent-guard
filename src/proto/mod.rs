@@ -128,7 +128,14 @@ pub fn is_udp_tracker(d: &[u8]) -> bool {
         return true; // connect request
     }
     // announce request (BEP 15): 98 байт, action=1, порт в конце ненулевой
-    (98..=120).contains(&d.len()) && d[8..12] == [0, 0, 0, 1] && d[..8].iter().any(|&b| b != 0) && d[96..98] != [0, 0]
+    // Проверяем и поля event (0..=3) и num_want (-1 или разумное число): иначе
+    // DNS-ответ с ARCOUNT=1 (EDNS) даёт те же байты 8..12 = 00 00 00 01.
+    if !(98..=120).contains(&d.len()) || d[8..12] != [0, 0, 0, 1] || d[..8].iter().all(|&b| b == 0) || d[96..98] == [0, 0] {
+        return false;
+    }
+    let event = u32::from_be_bytes([d[80], d[81], d[82], d[83]]);
+    let num_want = i32::from_be_bytes([d[92], d[93], d[94], d[95]]);
+    event <= 3 && (num_want == -1 || (0..=1000).contains(&num_want))
 }
 
 pub fn is_lsd(d: &[u8]) -> bool {
@@ -314,6 +321,22 @@ mod tests {
         c.extend_from_slice(&[0, 0, 0, 0, 1, 2, 3, 4]);
         assert!(is_udp_tracker(&c));
         assert!(!is_udp_tracker(&[0u8; 16]));
+        // настоящий announce
+        let mut a = vec![0x5au8; 98];
+        a[8..12].copy_from_slice(&[0, 0, 0, 1]);
+        a[80..84].copy_from_slice(&2u32.to_be_bytes());
+        a[92..96].copy_from_slice(&(-1i32).to_be_bytes());
+        a[96..98].copy_from_slice(&6881u16.to_be_bytes());
+        assert!(is_udp_tracker(&a));
+        // DNS-ответ dl.google.com с EDNS, снят на реальной ноде
+        let dns = hex("7b248180000100040000000102646c06676f6f676c6503636f6d0000010001c00c000100010000002c00048efa66bec00c000100010000002c00048efa665dc00c000100010000002c00048efa665bc00c000100010000002c00048efa66880000290 4d0000000000000");
+        assert_eq!(dns.len(), 106);
+        assert!(!is_udp_tracker(&dns));
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        let s: String = s.split_whitespace().collect();
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]
