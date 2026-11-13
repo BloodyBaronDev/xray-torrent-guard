@@ -2,11 +2,13 @@
 //!
 //! API намеренно минимальный, чтобы любой мог подключить свою панель/бота/фаервол:
 //!   GET /health            → {"status":"ok","packets":N,...}
-//!   GET /v1/events?since=N → массив событий с id > N (кольцевой буфер)
+//!   GET /v1/events?since=N → массив событий с id > N (кольцевой буфер;
+//!                            с --events-file переживает перезапуск)
 //!   GET /v1/subjects       → текущие оценки субъектов
 use crate::engine::Score;
 use crate::event::{score_json, Event};
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::process::Command;
@@ -18,7 +20,8 @@ const RING: usize = 1000;
 
 #[derive(Default)]
 pub struct Shared {
-    pub events: VecDeque<Event>,
+    /// (id, готовый JSON) — так события можно восстановить из файла.
+    pub events: VecDeque<(u64, String)>,
     pub next_id: u64,
     pub scores: Vec<Score>,
     pub packets: u64,
@@ -33,6 +36,20 @@ pub struct Sinks {
     pub state: State,
     pub stdout: bool,
     tx: Option<SyncSender<Event>>,
+    store: Option<Store>,
+}
+
+/// Файл событий (JSON Lines). Дописывается на каждое событие; когда строк
+/// становится вдвое больше буфера, переписывается содержимым буфера.
+struct Store {
+    path: String,
+    file: Mutex<File>,
+    lines: Mutex<usize>,
+}
+
+fn event_id(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix("{\"id\":")?;
+    rest[..rest.find(|c: char| !c.is_ascii_digit())?].parse().ok()
 }
 
 impl Sinks {
@@ -54,21 +71,50 @@ impl Sinks {
             });
             tx
         });
-        Self { state: State::default(), stdout, tx }
+        Self { state: State::default(), stdout, tx, store: None }
+    }
+
+    /// Загрузить события из файла и дальше дописывать туда новые.
+    pub fn with_store(mut self, path: &str) -> std::io::Result<Self> {
+        let mut n = 0;
+        if let Ok(f) = File::open(path) {
+            let mut s = self.state.lock().unwrap();
+            for line in BufReader::new(f).lines() {
+                let line = line?;
+                if let Some(id) = event_id(&line) {
+                    n += 1;
+                    s.next_id = s.next_id.max(id);
+                    if s.events.len() == RING {
+                        s.events.pop_front();
+                    }
+                    s.events.push_back((id, line));
+                }
+            }
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        self.store = Some(Store { path: path.to_string(), file: Mutex::new(file), lines: Mutex::new(n) });
+        Ok(self)
     }
 
     pub fn publish(&self, mut ev: Event) {
+        let json;
         {
             let mut s = self.state.lock().unwrap();
             s.next_id += 1;
             ev.id = s.next_id;
+            json = ev.to_json();
             if s.events.len() == RING {
                 s.events.pop_front();
             }
-            s.events.push_back(ev.clone());
+            s.events.push_back((ev.id, json.clone()));
+            if let Some(st) = &self.store {
+                if let Err(e) = st.append(&json, &s.events) {
+                    eprintln!("xtg: {}: {e}", st.path);
+                }
+            }
         }
         if self.stdout {
-            println!("{}", ev.to_json());
+            println!("{json}");
         }
         if let Some(tx) = &self.tx {
             if let Err(TrySendError::Full(_)) = tx.try_send(ev) {
@@ -79,6 +125,28 @@ impl Sinks {
 }
 
 /// Запуск внешней команды; данные события — в переменных окружения.
+impl Store {
+    fn append(&self, json: &str, ring: &VecDeque<(u64, String)>) -> std::io::Result<()> {
+        let mut lines = self.lines.lock().unwrap();
+        let mut f = self.file.lock().unwrap();
+        if *lines >= 2 * RING {
+            let tmp = format!("{}.tmp", self.path);
+            let mut t = File::create(&tmp)?;
+            for (_, j) in ring {
+                writeln!(t, "{j}")?;
+            }
+            t.sync_all()?;
+            std::fs::rename(&tmp, &self.path)?;
+            *f = OpenOptions::new().append(true).open(&self.path)?;
+            *lines = ring.len();
+            return Ok(());
+        }
+        writeln!(f, "{json}")?;
+        *lines += 1;
+        Ok(())
+    }
+}
+
 fn run_exec(cmd: &str, ev: &Event) {
     let reasons: Vec<String> = ev.reasons.iter().map(|(n, c)| format!("{n}:{c}")).collect();
     let mut c = if cfg!(windows) {
@@ -176,7 +244,7 @@ pub fn route(path: &str, query: &str, state: &State) -> (&'static str, String) {
                 .find_map(|kv| kv.strip_prefix("since="))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            let items: Vec<String> = st.events.iter().filter(|e| e.id > since).map(|e| e.to_json()).collect();
+            let items: Vec<&str> = st.events.iter().filter(|e| e.0 > since).map(|e| e.1.as_str()).collect();
             ("200 OK", format!("[{}]", items.join(",")))
         }
         "/v1/subjects" => {
@@ -207,5 +275,28 @@ mod tests {
         assert!(b.contains("\"id\":3") && !b.contains("\"id\":2"));
         assert!(b.contains("\"reasons\":{\"dht\":1}"));
         assert_eq!(route("/nope", "", &sinks.state).0, "404 Not Found");
+    }
+
+    #[test]
+    fn events_survive_restart() {
+        let path = std::env::temp_dir().join(format!("xtg-ev-{}.jsonl", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ev = || Event::new(1_500_000, Score { subject: SubjectId::Ip(ip), score: 100, reasons: vec![("dht", 1)] }, L4::Udp, ip);
+        {
+            let s = Sinks::new(false, None, None).with_store(path).unwrap();
+            for _ in 0..(2 * RING + 5) {
+                s.publish(ev());
+            }
+        }
+        let s = Sinks::new(false, None, None).with_store(path).unwrap();
+        s.publish(ev());
+        let st = s.state.lock().unwrap();
+        assert_eq!(st.events.len(), RING);
+        assert_eq!(st.events.back().unwrap().0, 2 * RING as u64 + 6);
+        drop(st);
+        assert!(std::fs::read_to_string(path).unwrap().lines().count() <= 2 * RING);
+        let _ = std::fs::remove_file(path);
     }
 }

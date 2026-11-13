@@ -44,15 +44,14 @@ impl Capture {
                 libc::close(fd);
                 return Err(e);
             }
-            // Больший буфер приёма сглаживает всплески.
-            let sz: libc::c_int = 4 << 20;
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &sz as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as u32,
-            );
+            // Больший буфер приёма сглаживает всплески. SO_RCVBUF урезается до
+            // net.core.rmem_max (обычно ~200 КБ), поэтому от root берём FORCE.
+            let sz: libc::c_int = 16 << 20;
+            let p = &sz as *const _ as *const libc::c_void;
+            let l = std::mem::size_of::<libc::c_int>() as u32;
+            if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUFFORCE, p, l) < 0 {
+                libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, p, l);
+            }
             // детекторам нужны первые сотни байт: копируем не больше SNAP
             Ok(Self { fd, buf: vec![0u8; SNAP], received: 0, dropped: 0 })
         }

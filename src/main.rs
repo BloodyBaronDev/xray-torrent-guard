@@ -24,6 +24,7 @@ const USAGE: &str = "xtg — Xray Torrent Guard
   --webhook URL      POST каждого события на http://...
   --exec CMD         команда на событие (env: XTG_SUBJECT, XTG_SCORE, XTG_REMOTE, XTG_REASONS, XTG_EVENT)
   --quiet            не печатать события в stdout
+  --events-file PATH хранить события в файле (JSON Lines), чтобы API пережил перезапуск
 
 Xray:
   --xray-log PATH        access-лог Xray: события по пользователю (email) вместо IP
@@ -43,10 +44,11 @@ struct Opts {
     xray_log: Option<String>,
     utc_offset_s: i64,
     log_max: Option<u64>,
+    events_file: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { cfg: Config::default(), api: None, webhook: None, exec: None, iface: None, quiet: false, file: None, xray_log: None, utc_offset_s: 0, log_max: None };
+    let mut o = Opts { cfg: Config::default(), api: None, webhook: None, exec: None, iface: None, quiet: false, file: None, xray_log: None, utc_offset_s: 0, log_max: None, events_file: None };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().ok_or(format!("{a}: нужно значение"));
@@ -61,6 +63,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--exec" => o.exec = Some(val()?),
             "--iface" => o.iface = Some(val()?),
             "--quiet" => o.quiet = true,
+            "--events-file" => o.events_file = Some(val()?),
             "--xray-log" => o.xray_log = Some(val()?),
             "--xray-log-max" => o.log_max = Some(parse_size(&val()?).ok_or(format!("{a}: например 64M"))?),
             "--only-attributed" => o.cfg.only_attributed = true,
@@ -137,7 +140,10 @@ fn main() -> ExitCode {
 }
 
 fn sinks(o: &Opts) -> Result<Sinks, String> {
-    let s = Sinks::new(!o.quiet, o.webhook.clone(), o.exec.clone());
+    let mut s = Sinks::new(!o.quiet, o.webhook.clone(), o.exec.clone());
+    if let Some(p) = &o.events_file {
+        s = s.with_store(p).map_err(|e| format!("{p}: {e}"))?;
+    }
     if let Some(addr) = &o.api {
         api::serve(addr, s.state.clone()).map_err(|e| format!("api {addr}: {e}"))?;
         eprintln!("xtg: API на http://{addr}");
@@ -211,7 +217,23 @@ fn run(o: Opts) -> Result<(), String> {
     let mut last = Instant::now();
     let mut reported_drops = 0u64;
     loop {
-        let (ts, data) = cap.next().map_err(|e| e.to_string())?;
+        let (ts, data) = match cap.next() {
+            Ok(v) => v,
+            // Интерфейс пропал или упал (перезапуск сети, смена реле): ждём и
+            // открываем заново, не теряя состояние движка и события.
+            Err(e) => {
+                eprintln!("xtg: {iface}: {e} — переоткрываю захват");
+                cap = loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                    if let Ok(c) = xray_torrent_guard::live::Capture::open(&iface) {
+                        break c;
+                    }
+                };
+                reported_drops = 0;
+                eprintln!("xtg: захват на {iface} восстановлен");
+                continue;
+            }
+        };
         if let Some(p) = packet::parse_ip(ts, data) {
             if let Some(ev) = eng.process(&p) {
                 sinks.publish(ev);

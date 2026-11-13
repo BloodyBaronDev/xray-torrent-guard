@@ -5,12 +5,14 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=-/etc/default/xtg
-ExecStart=/usr/local/bin/xtg run --iface ${XTG_IFACE} --xray-log ${XTG_LOG} --xray-log-max ${XTG_LOG_MAX} --only-attributed --api ${XTG_API} --quiet $XTG_ARGS
+ExecStart=/usr/local/bin/xtg run --iface ${XTG_IFACE} --xray-log ${XTG_LOG} --xray-log-max ${XTG_LOG_MAX} --only-attributed --api ${XTG_API} --events-file /var/lib/xtg/events.jsonl --quiet $XTG_ARGS
 Restart=always
 RestartSec=3
 # root без лишних прав: захват пакетов и усечение лога, который пишет Xray
-# (часто от nobody); запись разрешена только в /run/xray
-CapabilityBoundingSet=CAP_NET_RAW CAP_DAC_OVERRIDE
+# (часто от nobody); NET_ADMIN — только для большого буфера приёма
+# (SO_RCVBUFFORCE). Запись разрешена в /run/xray и /var/lib/xtg (события).
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_DAC_OVERRIDE
+StateDirectory=xtg
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
