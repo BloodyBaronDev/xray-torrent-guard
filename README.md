@@ -154,3 +154,4 @@ API без авторизации — слушайте только `127.0.0.1`.
 | Веер UDP ≥ 40 пиров/мин | 50 | юнит-тест |
 
 Результаты на реальных клиентах — в [testbed/results.md](testbed/results.md), как воспроизвести — [testbed/README.md](testbed/README.md).
+Полевой прогон на боевой ноде (13–14.11.2026) — [docs/field-test-2026-11.md](docs/field-test-2026-11.md).
